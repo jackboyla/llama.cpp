@@ -3835,6 +3835,13 @@ void llm_graph_context::build_sampling() const {
             assert(sampler->iface->backend_apply);
             sampler->iface->backend_apply(sampler, ctx0, gf, &data);
 
+            // Keep output flags stable when the active sampler set changes.
+            for (ggml_tensor * tensor : { data.sampled, data.probs, data.logits, data.candidates }) {
+                if (tensor != nullptr) {
+                    ggml_set_output(tensor);
+                }
+            }
+
             if (data.sampled != nullptr) {
                 if (active) {
                     res->t_sampled[rows[i]] = data.sampled;

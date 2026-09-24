@@ -615,6 +615,85 @@ static void test_reallocation() {
     }
 }
 
+static void test_output_flag_reallocation() {
+    dummy_backend    backend = dummy_backend_init(SIZE_MAX, /*align*/ 4);
+    ggml_gallocr_ptr galloc(ggml_gallocr_new(&backend.buffer_type));
+
+    {
+        auto [ctx, graph, ctx_ptr] = make_context();
+        ggml_tensor * x = make_input_1d(ctx, 8);
+        for (int r = 0; r < 2; ++r) {
+            ggml_tensor * row  = ggml_view_1d(ctx, x, 4, r * 4 * sizeof(float));
+            ggml_tensor * ids  = ggml_top_k(ctx, row, 1);
+            ggml_tensor * vals = ggml_get_rows(ctx, ggml_reshape_2d(ctx, row, 1, 4), ids);
+            ggml_build_forward_expand(graph, vals);
+        }
+        assign_names(ctx);
+        GGML_ASSERT(ggml_gallocr_reserve(galloc.get(), graph));
+    }
+
+    {
+        auto [ctx, graph, ctx_ptr] = make_context();
+        ggml_tensor * x = make_input_1d(ctx, 8);
+        ggml_tensor * ids[2];
+        for (int r = 0; r < 2; ++r) {
+            ggml_tensor * row  = ggml_view_1d(ctx, x, 4, r * 4 * sizeof(float));
+            ids[r]             = ggml_top_k(ctx, row, 1);
+            ggml_tensor * vals = ggml_get_rows(ctx, ggml_reshape_2d(ctx, row, 1, 4), ids[r]);
+            ggml_set_output(ids[r]);
+            ggml_build_forward_expand(graph, vals);
+        }
+        assign_names(ctx);
+
+        GGML_ASSERT(ggml_gallocr_alloc_graph(galloc.get(), graph));
+        check_all_allocated(graph);
+        GGML_ASSERT(ids[0]->data != ids[1]->data);
+    }
+
+    // output-safe plans remain valid when output flags are removed
+    {
+        auto [ctx, graph, ctx_ptr] = make_context();
+        ggml_tensor * x = make_input_1d(ctx, 8);
+        ggml_tensor * ids[2];
+        for (int r = 0; r < 2; ++r) {
+            ggml_tensor * row  = ggml_view_1d(ctx, x, 4, r * 4 * sizeof(float));
+            ids[r]             = ggml_top_k(ctx, row, 1);
+            ggml_tensor * vals = ggml_get_rows(ctx, ggml_reshape_2d(ctx, row, 1, 4), ids[r]);
+            ggml_build_forward_expand(graph, vals);
+        }
+        assign_names(ctx);
+
+        GGML_ASSERT(ggml_gallocr_alloc_graph(galloc.get(), graph));
+        check_all_allocated(graph);
+        GGML_ASSERT(ids[0]->data != ids[1]->data);
+    }
+}
+
+static void test_input_flag_reallocation() {
+    dummy_backend    backend = dummy_backend_init(SIZE_MAX, /*align*/ 4);
+    ggml_gallocr_ptr galloc(ggml_gallocr_new(&backend.buffer_type));
+
+    int run = 0;
+    for (bool is_input : { false, true, false }) {
+        auto [ctx, graph, ctx_ptr] = make_context();
+        ggml_tensor * x[3];
+        x[0] = make_input_with_size(ctx, 16);
+        x[1] = ggml_scale(ctx, x[0], 2.0f);
+        x[2] = ggml_sum(ctx, x[1]);
+        if (is_input) {
+            ggml_set_input(x[1]);
+        }
+        ggml_set_output(x[2]);
+        ggml_build_forward_expand(graph, x[2]);
+        assign_names(ctx);
+
+        GGML_ASSERT(ggml_gallocr_alloc_graph(galloc.get(), graph));
+        check_all_allocated(graph);
+        GGML_ASSERT((x[0]->data != x[1]->data) == (run > 0));
+        ++run;
+    }
+}
+
 static void test_backend_graph_optimize(ggml_backend_t, ggml_cgraph * graph, ggml_backend_graph_optimize_params * params) {
     GGML_ASSERT(graph->n_nodes == 3);
     params->add_alloc_dep(params->user_data, graph->nodes[0], graph->nodes[2]);
@@ -671,6 +750,8 @@ int main() {
     run("test_multiple_buffer_types", test_multiple_buffer_types);
     run("test_buffer_size_zero", test_buffer_size_zero);
     run("test_reallocation", test_reallocation);
+    run("test_output_flag_reallocation", test_output_flag_reallocation);
+    run("test_input_flag_reallocation", test_input_flag_reallocation);
     run("test_graph_optimize_alloc_dep", test_graph_optimize_alloc_dep);
     return 0;
 }
