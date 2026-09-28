@@ -1095,6 +1095,11 @@ static buft_list_t make_cpu_buft_list(const std::vector<llama_device> & devices,
     // function of the device to determine if it would benefit from being stored in a host buffer
     if (!no_host) {
         for (const auto & dev : devices) {
+            ggml_backend_dev_props props;
+            ggml_backend_dev_get_props(dev.dev, &props);
+            if (props.type == GGML_BACKEND_DEVICE_TYPE_IGPU && !props.caps.mmap_support) {
+                continue;
+            }
             ggml_backend_buffer_type_t buft = ggml_backend_dev_host_buffer_type(dev.dev);
             if (buft) {
                 buft_list.emplace_back(dev.dev, buft);
