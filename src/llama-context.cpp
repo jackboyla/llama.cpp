@@ -1074,7 +1074,7 @@ float * llama_context::get_sampled_probs_ith(int32_t idx) {
         if ((size_t) row >= sampling.probs_count.size() || sampling.probs_count[row] == 0) {
             return nullptr;
         }
-        return sampling.probs.data + row*model.vocab.n_tokens();
+        return sampling.probs.data + row*sampling.stride;
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid backend sampled probs id %d, reason: %s\n", __func__, idx, err.what());
         return nullptr;
@@ -1093,7 +1093,7 @@ float * llama_context::get_sampled_logits_ith(int32_t idx) {
         if ((size_t) row >= sampling.logits_count.size() || sampling.logits_count[row] == 0) {
             return nullptr;
         }
-        return sampling.logits.data + row*model.vocab.n_tokens();
+        return sampling.logits.data + row*sampling.stride;
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid backend sampled logits id %d, reason: %s\n", __func__, idx, err.what());
         return nullptr;
@@ -1108,7 +1108,7 @@ const llama_token * llama_context::get_sampled_candidates_ith(int32_t idx) {
         if (sampling.candidates.has_data() &&
             (size_t) row < sampling.candidates_count.size() &&
             sampling.candidates_count[row] > 0) {
-            return sampling.candidates.data + row*model.vocab.n_tokens();
+            return sampling.candidates.data + row*sampling.stride;
         }
     } catch (const std::exception & err) {
         // fallback to full vocab list
@@ -1294,6 +1294,7 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
             sched_need_reserve = true;
         }
         sampling.samplers.erase(seq_id);
+        sampling.n_out.erase(seq_id);
         return false;
     }
 
@@ -1309,6 +1310,7 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
         sampler->iface->backend_init(sampler, buft, cparams.n_outputs_max_per_seq);
 
         sampling.samplers[seq_id] = sampler;
+        sampling.n_out[seq_id]    = llama_sampler_backend_n_out(sampler, model.vocab.n_tokens());
 
         sched_need_reserve = true;
 
@@ -1323,11 +1325,13 @@ bool llama_context::set_sampler(llama_seq_id seq_id, llama_sampler * sampler) {
         }
 
         sampling.samplers.erase(seq_id);
+        sampling.n_out.erase(seq_id);
 
         return false;
     }
 
     sampling.samplers.erase(seq_id);
+    sampling.n_out.erase(seq_id);
 
     sched_need_reserve = true;
 
@@ -2028,7 +2032,7 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
         }
 
         if (has_samplers) {
-            const auto stride = n_vocab;
+            const auto stride = sampling.stride;
 
             // async copy the sampling data from the backend to the host
             copy_tensor_async_rows(res->t_sampled,        sampling.sampled,    1,      n_outputs_prev, sched.get());
@@ -2143,10 +2147,16 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     }
 
     // Allocate backend sampling output buffers if there are backend samplers configured.
+    // Each row holds the widest sampler output, e.g. k values after top-k.
     const bool has_sampling = !sampling.samplers.empty();
     if (has_sampling) {
-        backend_float_count = 2 * n_vocab * n_outputs_max;      // logits + probs
-        backend_token_count = (1 + n_vocab) * n_outputs_max;    // sampled + candidates
+        sampling.stride = 0;
+        for (const auto & [seq_id, n_out] : sampling.n_out) {
+            sampling.stride = std::max<size_t>(sampling.stride, n_out);
+        }
+
+        backend_float_count = 2 * sampling.stride * n_outputs_max;      // logits + probs
+        backend_token_count = (1 + sampling.stride) * n_outputs_max;    // sampled + candidates
     }
 
     if (output_ids.empty()) {
@@ -2218,16 +2228,16 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     }
 
     if (has_sampling) {
-        sampling.logits = {(float *) (base + offset), (size_t)(n_vocab*n_outputs_max)};
+        sampling.logits = {(float *) (base + offset), (size_t)(sampling.stride*n_outputs_max)};
         offset += sampling.logits.size * sizeof(float);
 
-        sampling.probs = {(float *) (base + offset), (size_t)(n_vocab*n_outputs_max)};
+        sampling.probs = {(float *) (base + offset), (size_t)(sampling.stride*n_outputs_max)};
         offset += sampling.probs.size * sizeof(float);
 
         sampling.sampled = {(llama_token *) (base + offset), (size_t)n_outputs_max};
         offset += sampling.sampled.size * sizeof(llama_token);
 
-        sampling.candidates = {(llama_token *) (base + offset), (size_t)(n_vocab*n_outputs_max)};
+        sampling.candidates = {(llama_token *) (base + offset), (size_t)(sampling.stride*n_outputs_max)};
         offset += sampling.candidates.size * sizeof(llama_token);
 
         // The count vectors keep track of the actual number of logits/probs/candidates
@@ -2337,16 +2347,16 @@ void llama_context::output_reorder() {
             assert(sampling.probs_count.size() > 0);
             assert(sampling.candidates_count.size() > 0);
 
-            for (uint64_t k = 0; k < n_vocab; ++k) {
-                std::swap(sampling.logits.data[i0*n_vocab + k], sampling.logits.data[i1*n_vocab + k]);
+            for (uint64_t k = 0; k < sampling.stride; ++k) {
+                std::swap(sampling.logits.data[i0*sampling.stride + k], sampling.logits.data[i1*sampling.stride + k]);
             }
 
-            for (uint64_t k = 0; k < n_vocab; ++k) {
-                std::swap(sampling.probs.data[i0*n_vocab + k], sampling.probs.data[i1*n_vocab + k]);
+            for (uint64_t k = 0; k < sampling.stride; ++k) {
+                std::swap(sampling.probs.data[i0*sampling.stride + k], sampling.probs.data[i1*sampling.stride + k]);
             }
 
-            for (uint64_t k = 0; k < n_vocab; ++k) {
-                std::swap(sampling.candidates.data[i0*n_vocab + k], sampling.candidates.data[i1*n_vocab + k]);
+            for (uint64_t k = 0; k < sampling.stride; ++k) {
+                std::swap(sampling.candidates.data[i0*sampling.stride + k], sampling.candidates.data[i1*sampling.stride + k]);
             }
 
             std::swap(sampling.sampled.data[i0],     sampling.sampled.data[i1]);

@@ -36,6 +36,8 @@ struct llama_sampler_chain {
 };
 
 uint32_t llama_sampler_backend_n_nodes(const llama_sampler * sampler);
+// max number of logits/probs/candidates per output row for n_vocab input logits
+uint32_t llama_sampler_backend_n_out(llama_sampler * sampler, int64_t n_vocab);
 void llama_sampler_backend_begin(llama_sampler * sampler);
 
 struct llama_sampler * llama_sampler_init_dry_testing(

@@ -578,6 +578,7 @@ static void llama_sampler_backend_copy_state(const struct llama_sampler * src, s
 struct llama_sampler_backend_probe {
     ggml_context_ptr ctx;
     ggml_cgraph * gf;
+    llama_sampler_data data;
 };
 
 static llama_sampler_backend_probe llama_sampler_backend_probe_graph(
@@ -621,7 +622,7 @@ static llama_sampler_backend_probe llama_sampler_backend_probe_graph(
         sampler->iface->backend_reset(sampler);
     }
 
-    return { std::move(ctx_ptr), gf };
+    return { std::move(ctx_ptr), gf, data };
 }
 
 static uint32_t llama_sampler_backend_probe_n_nodes(const llama_sampler_backend_probe & probe) {
@@ -890,6 +891,19 @@ uint32_t llama_sampler_backend_n_nodes(const llama_sampler * sampler) {
     GGML_ASSERT(chain->is_init);
 
     return chain->n_nodes;
+}
+
+uint32_t llama_sampler_backend_n_out(llama_sampler * sampler, int64_t n_vocab) {
+    auto probe = llama_sampler_backend_probe_graph(sampler, n_vocab, GGML_DEFAULT_GRAPH_SIZE, false);
+
+    int64_t res = 0;
+    for (auto * output : { probe.data.logits, probe.data.probs, probe.data.candidates }) {
+        if (output) {
+            res = std::max(res, ggml_nelements(output));
+        }
+    }
+
+    return res;
 }
 
 llama_token llama_sampler_sample(struct llama_sampler * smpl, struct llama_context * ctx, int32_t idx) {
